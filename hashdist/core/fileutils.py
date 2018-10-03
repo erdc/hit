@@ -36,26 +36,59 @@ def silent_relative_symlink(src, dst):
         dstdir = os.path.dirname(dst)
         rel_src = os.path.relpath(src, dstdir)
         os.symlink(rel_src, dst)
-    except OSError:
-        if not os.path.exists(dst):
-            raise
-
+    except OSError as e:
+        if e.errno == errno.EEXIST:
+            pass
+        elif not os.path.exists(dst):
+            parent = dstdir
+            if os.path.isdir(parent):
+                try:
+                    os.chmod(parent, 0o777)
+                    os.symlink(rel_src, dst)
+                except OSError as e:
+                    import pdb
+                    pdb.set_trace()
+                    if not os.path.exists(dst):
+                        raise
+            else:
+                raise
 
 def silent_absolute_symlink(src, dst):
     try:
         os.symlink(os.path.abspath(src), dst)
-    except OSError:
-        if not os.path.exists(dst):
-            raise
-
+    except OSError as e:
+        if e.errno == errno.EEXIST:
+            pass
+        elif not os.path.exists(dst):
+            parent = os.path.split(dst)[0]
+            if os.path.isdir(parent):
+                try:
+                    os.chmod(parent, 0o777)
+                    os.symlink(os.path.abspath(src), dst)
+                except OSError:
+                    if not os.path.exists(dst):
+                        raise
+            else:
+                raise
 
 def silent_makedirs(path):
     """like os.makedirs, but does not raise error in the event that the directory already exists"""
     try:
         os.makedirs(path)
-    except OSError:
-        if not os.path.isdir(path):
-            raise
+    except OSError as e:
+        if e.errno == errno.EEXIST:
+            pass
+        elif not os.path.isdir(path):
+            parent = os.path.split(path)[0]
+            if os.path.isdir(parent):
+                try:
+                    os.chmod(parent, 0o777)
+                    os.makedirs(path)
+                except OSError:
+                    if not os.path.isdir(path):
+                        raise
+            else:
+                raise
 
 def silent_unlink(path):
     """like os.unlink but does not raise error if the file does not exist"""
@@ -84,7 +117,13 @@ def robust_rmtree(path, logger=None, max_retries=6):
                 logger.info('Retrying after %d seconds' % dt)
             time.sleep(dt)
             dt *= 2
-
+        except UnicodeDecodeError:
+            if logger:
+                logger.info('UnicodeDecodeError, unable to remove path: %s' % path)
+                logger.info('Trying to explicitly encode')
+            path = path.decode("utf-8").encode("utf-8")
+            if logger:
+                logger.info('Now trying path: %s' % path)
     # Final attempt, pass any Exceptions up to caller.
     shutil.rmtree(path)
 

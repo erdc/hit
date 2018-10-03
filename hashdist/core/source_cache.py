@@ -100,7 +100,7 @@ from timeit import default_timer as clock
 import contextlib
 import urlparse
 from contextlib import closing
-
+import logging
 from .common import working_directory
 from .hasher import hash_document, format_digest, HashingReadStream, HashingWriteStream
 from .fileutils import silent_makedirs
@@ -134,13 +134,14 @@ class SecurityError(SourceCacheError):
 
 class ProgressBar(object):
 
-    def __init__(self, total_size, bar_length=25):
+    def __init__(self, total_size, logger, bar_length=25):
         """
         total_size ... the size in bytes of the file to be downloaded
         """
         self._total_size = total_size
         self._bar_length = bar_length
         self._t1 = clock()
+        self.logger = logger
 
     def update(self, current_size):
         """
@@ -165,26 +166,31 @@ class ProgressBar(object):
         msg = "\r[" + "="*f1 + " "*f2 + "] %4.1f%% (%.1fMB of %.1fMB) %s  " % \
                 (percent, current_size / 1024.**2, self._total_size / 1024.**2,
                         rate_eta_str)
-        sys.stdout.write(msg)
-        sys.stdout.flush()
+        if self.logger.level <= logging.DEBUG:
+            sys.stdout.write(msg)
+            sys.stdout.flush()
 
     def finish(self):
-        sys.stdout.write("\n")
+        if self.logger.level <= logging.DEBUG:
+            sys.stdout.write("\n")
 
 class ProgressSpinner(object):
     """Replacement for ProgressBar when we don't know the file length."""
     ANIMATE = ['-', '/', '|', '\\']
 
-    def __init__(self):
+    def __init__(self, logger):
         self._i = 0
+        self.logger = logger
 
     def update(self, current_size):
-        sys.stdout.write('\r{}'.format(self.ANIMATE[self._i]))
-        sys.stdout.flush()
-        self._i = (self._i + 1) % len(self.ANIMATE)
+        if self.logger.level <= logging.DEBUG:
+            sys.stdout.write('\r{}'.format(self.ANIMATE[self._i]))
+            sys.stdout.flush()
+            self._i = (self._i + 1) % len(self.ANIMATE)
 
     def finish(self):
-        sys.stdout.write("\n")
+        if self.logger.level <= logging.DEBUG:
+            sys.stdout.write("\n")
 
 def mkdir_if_not_exists(path):
     try:
@@ -197,7 +203,7 @@ class SourceCache(object):
     """
     """
 
-    def __init__(self, cache_path, logger, mirrors=(), create_dirs=False):
+    def __init__(self, cache_path, logger, local_mirrors=(), mirrors=(), create_dirs=False):
         if not os.path.isdir(cache_path):
             if create_dirs:
                 silent_makedirs(cache_path)
@@ -205,6 +211,7 @@ class SourceCache(object):
                 raise ValueError('"%s" is not an existing directory' % cache_path)
         self.cache_path = os.path.realpath(cache_path)
         self.logger = logger
+        self.local_mirrors = local_mirrors
         self.mirrors = mirrors
 
     def _ensure_subdir(self, name):
@@ -223,13 +230,17 @@ class SourceCache(object):
         if 'dir' not in config['source_caches'][0]:
             logger.error('First source cache need to be a local directory')
             raise NotImplementedError()
+        local_mirrors = []
         mirrors = []
         for entry in config['source_caches'][1:]:
-            if 'url' not in entry:
-                logger.error('All but first source cache currently needs to be remote')
+            if 'url' in entry:
+                mirrors.append(entry['url'])
+            elif 'dir' in entry:
+                local_mirrors.append(entry['dir'])
+            else:
+                logger.error('Unrecognized source cache mirror entry = '+`entry`)
                 raise NotImplementedError()
-            mirrors.append(entry['url'])
-        return SourceCache(config['source_caches'][0]['dir'], logger, mirrors, create_dirs)
+        return SourceCache(config['source_caches'][0]['dir'], logger, local_mirrors, mirrors, create_dirs)
 
     def fetch_git(self, repository, rev, repo_name):
         """Fetches source code from git repository
@@ -383,7 +394,8 @@ class GitSourceCache(object):
     def __init__(self, source_cache):
         self.repo_path = pjoin(source_cache.cache_path, GIT_DIRNAME)
         self.logger = source_cache.logger
-
+        self.local_mirrors = source_cache.local_mirrors
+    
     def git(self, repo_name, *args):
         # Inherit stdin/stdout in order to interact with user about any passwords
         # required to connect to any servers and so on
@@ -491,6 +503,15 @@ class GitSourceCache(object):
                 repo, branch = terms
             else:
                 raise ValueError('Please specify git repository as "git://repo/url [branchname]"')
+            for mirror in self.local_mirrors:
+                try:
+                    self.logger.warning("trying local mirror git repository")
+                    self.logger.warning(pjoin(mirror,'git',repo_name))
+                    self.fetch_git(pjoin(mirror,'git',repo_name), branch, repo_name, commit)
+                    self.logger.warning("succeded local mirror git repository")
+                except:
+                    self.logger.warning("failed local mirror git repository")
+                    pass
             self.fetch_git(repo, branch, repo_name, commit)
 
     def _has_commit(self, repo_name, commit):
@@ -648,6 +669,7 @@ class ArchiveSourceCache(object):
         self.source_cache = source_cache
         self.files_path = source_cache.cache_path
         self.packs_path = source_cache._ensure_subdir(PACKS_DIRNAME)
+        self.local_mirrors = source_cache.local_mirrors
         self.mirrors = source_cache.mirrors
         self.logger = self.source_cache.logger
 
@@ -674,16 +696,15 @@ class ArchiveSourceCache(object):
                 raise SourceNotFoundError(str(e))
         else:
             # Make request.
-            sys.stderr.write('Downloading %s...\n' % url)
             try:
                 stream = urllib2.urlopen(url)
             except urllib2.HTTPError, e:
                 msg = "urllib failed to download (code: %d): %s" % (e.code, url)
-                self.logger.error(msg)
+                self.logger.info(msg)
                 raise RemoteFetchError(msg)
             except urllib2.URLError, e:
                 msg = "urllib failed to download (reason: %s): %s" % (e.reason, url)
-                self.logger.error(msg)
+                self.logger.info(msg)
                 raise RemoteFetchError(msg)
 
         # Download file to a temporary file within self.packs_path, while hashing
@@ -694,10 +715,11 @@ class ArchiveSourceCache(object):
             f = os.fdopen(temp_fd, 'wb')
             tee = HashingWriteStream(hashlib.sha256(), f)
             if use_urllib:
-                if 'Content-Length' in stream.headers:
-                    progress = ProgressBar(int(stream.headers["Content-Length"]))
-                else:
-                    progress = ProgressSpinner()
+                if self.logger.level > logging.DEBUG:
+                    if 'Content-Length' in stream.headers:
+                        progress = ProgressBar(int(stream.headers["Content-Length"]),logger=self.logger)
+                    else:
+                        progress = ProgressSpinner(logger=self.logger)
             try:
                 n = 0
                 while True:
@@ -739,15 +761,42 @@ class ArchiveSourceCache(object):
     def contains(self, type, hash):
         return os.path.exists(self.get_pack_filename(type, hash))
 
+    def fetch_from_local_mirrors(self, type, hash):
+        for mirror in self.local_mirrors:
+            local_pack = '%s/%s/%s/%s' % (mirror, PACKS_DIRNAME, type, hash)
+            try:
+                shutil.copy(local_pack,self.get_pack_filename(type, hash))
+            except SourceNotFoundError:
+                msg = "Could not fetch source from local mirror, continuing"
+                self.logger.debug(msg)
+                continue
+            else:
+                msg = "Fetched source from local mirror"
+                self.logger.debug(msg)
+                return True # found it
+        msg = "Could not fetch source from any local mirrors for %s/%s" % (type,hash) 
+        self.logger.debug(msg)
+        return False
+
     def fetch_from_mirrors(self, type, hash):
         for mirror in self.mirrors:
             url = '%s/%s/%s/%s' % (mirror, PACKS_DIRNAME, type, hash)
             try:
                 self._download_archive(url, type, hash)
             except SourceNotFoundError:
+                msg = "Could not fetch source from remote mirror, continuing"
+                self.logger.debug(msg)
+                continue
+            except RemoteFetchError:
+                msg = "Could not fetch source pack on mirror, continuing"
+                self.logger.debug(msg)
                 continue
             else:
+                msg = "Found source on remote mirror"
+                self.logger.debug(msg)
                 return True # found it
+        msg = "Could not fetch source from any remote mirrors for %s/%s" % (type,hash)
+        self.logger.debug(msg)
         return False
 
     def fetch(self, url, type, hash, repo_name):
@@ -759,6 +808,8 @@ class ArchiveSourceCache(object):
     def fetch_archive(self, url, type, expected_hash):
         if expected_hash is not None:
             found = self.contains(type, expected_hash)
+            if not found:
+                found = self.fetch_from_local_mirrors(type, expected_hash)
             if not found:
                 found = self.fetch_from_mirrors(type, expected_hash)
             if found:

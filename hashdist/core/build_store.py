@@ -135,14 +135,18 @@ Reference
 import os
 from os.path import join as pjoin
 import shutil
+import hashlib
 import sys
 import re
 import errno
 import json
 import base64
+import tempfile
+import urllib2
+import stat
 
-from .source_cache import SourceCache
-from .hasher import hash_document, prune_nohash
+from .source_cache import SourceCache, ProgressBar
+from .hasher import hash_document, prune_nohash, HashingWriteStream
 from .common import (InvalidBuildSpecError, BuildFailedError,
                      IllegalBuildStoreError,
                      json_formatting_options, SHORT_ARTIFACT_ID_LEN,
@@ -153,6 +157,13 @@ from . import run_job
 
 from hashdist.util.logger_setup import log_to_file, getLogger
 
+class RemoteBuildStoreFetchError(Exception):
+    pass
+
+class BuildStoreError(Exception):
+    pass
+class StoreNotFoundError(BuildStoreError):
+    pass
 
 class BuildSpec(object):
     """Wraps the document corresponding to a build.json
@@ -230,6 +241,7 @@ def shorten_artifact_id(artifact_id, length=SHORT_ARTIFACT_ID_LEN):
     name, digest = artifact_id.split('/')
     return '%s/%s' % (name, digest[:length])
 
+SIMPLE_FILE_URL_RE = re.compile(r'^file:/?[^/]+.*$')
 
 class BuildStore(object):
     """
@@ -256,8 +268,9 @@ class BuildStore(object):
     logger : Logger
     """
 
+    chunk_size = 16 * 1024
 
-    def __init__(self, temp_build_dir, artifact_root, gc_roots_dir, logger, create_dirs=False):
+    def __init__(self, temp_build_dir, artifact_root, gc_roots_dir, logger, local_mirrors=(), mirrors=(), create_dirs=False):
         self.temp_build_dir = os.path.realpath(temp_build_dir)
         self.artifact_root = os.path.realpath(artifact_root)
         self.gc_roots_dir = gc_roots_dir
@@ -265,6 +278,8 @@ class BuildStore(object):
         if create_dirs:
             for d in [self.temp_build_dir, self.artifact_root]:
                 silent_makedirs(d)
+        self.local_mirrors = local_mirrors
+        self.mirrors = mirrors
 
     def _log_artifact_collision(self, path, artifact_id):
         d = dict(path=path, artifact_id=artifact_id)
@@ -280,16 +295,27 @@ class BuildStore(object):
 
     @staticmethod
     def create_from_config(config, logger, **kw):
-        """Creates a SourceCache from the settings in the configuration
+        """Creates a BuildStore from the settings in the configuration
         """
-        if len(config['build_stores']) != 1:
-            logger.error("Only a single build store currently supported")
+        if 'dir' not in config['build_stores'][0]:
+            logger.error('First build store needs to be a local directory')
             raise NotImplementedError()
-
+        local_mirrors = []
+        mirrors = []
+        for entry in config['build_stores'][1:]:
+            if 'url' in entry:
+                mirrors.append(entry['url'])
+            elif 'dir' in entry:
+                local_mirrors.append(entry['dir'])
+            else:
+                logger.error('Unrecognized build store mirror entry = '+`entry`)
+                raise NotImplementedError()
         return BuildStore(config['build_temp'],
                           config['build_stores'][0]['dir'],
                           config['gc_roots'],
                           logger,
+                          local_mirrors,
+                          mirrors,
                           **kw)
 
     def get_build_dir(self):
@@ -323,15 +349,164 @@ class BuildStore(object):
     def _get_artifact_path(self, name, digest):
         return pjoin(self.artifact_root, name, digest[:SHORT_ARTIFACT_ID_LEN])
 
-    def resolve(self, artifact_id):
+    def _download_artifact(self, url, path, name, digest):
+        import subprocess
+        import glob
+        from .build_tools import _check_call
+        # Provide a special case for local files
+        use_urllib = not SIMPLE_FILE_URL_RE.match(url)
+        if not use_urllib:
+            try:
+                stream = open(url[len('file:'):])
+            except IOError as e:
+                raise StoreNotFoundError(str(e))
+        else:
+            # Make request.
+            try:
+                stream = urllib2.urlopen(url)
+            except urllib2.HTTPError, e:
+                msg = "urllib failed to download (code: %d): %s" % (e.code, url)
+                self.logger.info(msg)
+                raise RemoteBuildStoreFetchError(msg)
+            except urllib2.URLError, e:
+                msg = "urllib failed to download (reason: %s): %s" % (e.reason, url)
+                self.logger.info(msg)
+                raise RemoteBuildStoreFetchError(msg)
+
+        # Download file to a temporary file within self.packs_path, while hashing
+        # it.
+        self.logger.info("Downloading '%s'" % url)
+        temp_fd, temp_path = tempfile.mkstemp(prefix='downloading-', dir=self.artifact_root)
+        try:
+            f = os.fdopen(temp_fd, 'wb')
+            tee = HashingWriteStream(hashlib.sha256(), f)
+            if use_urllib:
+                if 'Content-Length' in stream.headers:
+                    progress = ProgressBar(int(stream.headers["Content-Length"]), logger=self.logger)
+                else:
+                    progress = ProgressSpinner(logger=self.logger)
+            try:
+                n = 0
+                while True:
+                    chunk = stream.read(self.chunk_size)
+                    if not chunk: break
+                    if use_urllib:
+                        n += len(chunk)
+                        progress.update(n)
+                    tee.write(chunk)
+            finally:
+                stream.close()
+                f.close()
+                if use_urllib:
+                    progress.finish()
+        except Exception as e:
+            # Remove temporary file if there was a failure
+            os.unlink(temp_path)
+            msg = "Unhandled Exception in Download: %s" % e
+            self.logger.warning(msg)
+            raise RemoteBuildStoreFetchError(msg)
+        os.chmod(temp_path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+        subprocess.check_call(['tar', 'xzf', temp_path], cwd=self.artifact_root)
+        os.remove(temp_path)
+        def relocate(artifact_dir, path):
+            artifact_full_path = pjoin(self.artifact_root, artifact_dir)
+            if not path.startswith(artifact_full_path):
+                raise ValueError('filename must be prefixed with artifact_dir')
+            s = path[len(artifact_full_path):]
+            ignore_patterns = ['.*\.pyc',
+                               '.*\.pyo',
+                               '.id',
+                               '.artifact.json',
+                               '.build.json',
+                               '.build.log.gz']
+            for pattern in ignore_patterns:
+                if re.match(pattern, s):
+                    return
+
+            artifact_dir_b = artifact_dir.encode(sys.getfilesystemencoding())
+            is_link = os.path.islink(path)
+            location_file = pjoin(artifact_full_path, 'location')
+            if os.path.isfile(location_file):
+                with open(location_file, 'r') as f:
+                    from_b = pjoin(f.read()).encode(
+                        sys.getfilesystemencoding())
+            elif os.getenv('HASHDIST_MIRROR_BLD') != None:
+                from_b =  pjoin(os.getenv('HASHDIST_MIRROR_BLD'),
+                                artifact_dir).encode(
+                    sys.getfilesystemencoding())
+            else:
+                return
+            from_b_parent = os.path.split(os.path.split(os.path.split(from_b)[0])[0])[0]
+            if not is_link and os.path.isfile(path):
+                with open(path) as f:
+                    data = f.read()
+                if from_b_parent in data or from_b in data:
+                    to_b = pjoin(self.artifact_root,artifact_dir).encode(
+                        sys.getfilesystemencoding())
+                    to_b = os.path.split(os.path.split(to_b)[0])[0]
+                    to_b_parent = os.path.split(to_b)[0]
+                    from_b = os.path.split(os.path.split(from_b)[0])[0]
+                    if '\x7fELF' in data[:4]:
+                        self.logger.info(
+                            'ELF contains reference  to "%s", which is being replaced with : %s' % (from_b, to_b))
+                        #if 'PATCHELF' not in env:
+                        #    raise Exception('PATCHELF not set (Linux relocatable packages depend on patchelf)')
+                        patchelf = glob.glob(os.path.join(to_b,'patchelf','*','bin','patchelf'))[0]
+                        
+                        # OK, we have an ELF, patch it. We first shrink the RPATH to what is actually used.
+                        filename=path
+                        #_check_call(logger, [patchelf, '--shrink-rpath', filename])
+                        
+                        # Then grab the RPATH, replace old location
+                        try:
+                            out = _check_call(self.logger, [patchelf, '--print-rpath', filename]).strip()
+                        except:
+                            out = False#did our best...
+                        if out:
+                            # non-empty RPATH, patch it
+                            abs_rpaths_str = out.strip()
+                            abs_rpaths = abs_rpaths_str.split(':')
+                            d = os.path.dirname(os.path.realpath(filename))
+                            new_abs_rpaths = [abs_rpath.replace(from_b,to_b) for abs_rpath in abs_rpaths]
+                            new_abs_rpaths = [abs_rpath.replace(from_b_parent,to_b_parent) for abs_rpath in new_abs_rpaths]
+                            new_abs_rpaths_str = ':'.join(new_abs_rpaths)
+                            self.logger.info('Rewriting RPATH on "%s" from "%s" to "%s"' % (filename, abs_rpaths_str, new_abs_rpaths_str))
+                            _check_call(self.logger, [patchelf, '--set-rpath', new_abs_rpaths_str, filename])
+                    else:
+                        new_data = data.replace(from_b, to_b)
+                        new_data = new_data.replace(from_b_parent, to_b_parent)
+                        self.logger.info(
+                            'File contains reference  to "%s", which is being replaced with : %s' % (from_b, to_b))
+                        st = os.stat(path)
+                        os.chmod( path, st.st_mode | stat.S_IWRITE )
+                        os.unlink( path )
+                        with open(path,'w') as f:
+                            data = f.write(new_data)
+                        os.chmod( path, st.st_mode)
+        for dirpath, dirnames, filenames in os.walk(path, topdown=False):
+            st = os.stat(dirpath)
+            os.chmod(dirpath, st.st_mode | stat.S_IWRITE)
+            for filename in filenames:
+                relocate(pjoin(name, digest), pjoin(dirpath, filename))
+            os.chmod(dirpath, st.st_mode)
+    def resolve(self, artifact_id,build_store_only=False):
         """Given an artifact_id, resolve the short path for it, or return
         None if the artifact isn't built.
         """
         name, digest = artifact_id.split('/')
         path = self._get_artifact_path(name, digest)
-        if not os.path.exists(path):
+        if build_store_only and not os.path.exists(path):
+            return None
+        elif (not build_store_only and
+              not os.path.exists(path) and
+              not self.fetch_from_local_mirrors(name,digest[:SHORT_ARTIFACT_ID_LEN],path) and
+              not self.fetch_from_mirrors(name,digest[:SHORT_ARTIFACT_ID_LEN],path)):
+            msg = "No existing artifact in store or on mirrors for %s" % path
+            self.logger.debug(msg)
             return None
         else:
+            msg = "Examining existing artifact for %s" % path
+            self.logger.debug(msg)
             try:
                 f = open(pjoin(path, 'id'))
             except IOError:
@@ -352,9 +527,47 @@ class BuildStore(object):
                     raise IllegalBuildStoreError('Hashes collide in first 12 chars: %s and %s' % (present_id, artifact_id))
             return path
 
+    def fetch_from_local_mirrors(self, name,digest,path):
+        for mirror in self.local_mirrors:
+            path_mirror = '%s/%s/%s' % (mirror, name, digest)
+            try:
+                shutil.copytree(path_mirror,path)
+            except:
+                msg = "Could not fetch existing build from local mirror, continuing."
+                self.logger.debug(msg)
+                continue
+            else:
+                msg = "Fetched build from local mirror."
+                self.logger.debug(msg)
+                return True # found it
+        msg = "Could not find build on any local mirrors for %s" % path
+        self.logger.debug(msg)
+        return False
+
+    def fetch_from_mirrors(self, name,digest,path):
+        for mirror in self.mirrors:
+            url = '%s/%s/%s.tar.gz' % (mirror, name, digest)
+            try:
+                self._download_artifact(url, path, name, digest)
+            except StoreNotFoundError:
+                msg = "Could not find remote build store mirror, continuing"
+                self.logger.debug(msg)
+                continue
+            except RemoteBuildStoreFetchError:
+                msg = "Could not fetch existing build from remote mirror, continuing"
+                self.logger.debug(msg)
+                continue
+            else:
+                msg = "Fetched build from remote mirror"
+                self.logger.debug(msg)
+                return True # found it
+        msg = "Could not find build on any remote mirrors for %s" % path
+        self.logger.debug(msg)
+        return False
+
     def is_present(self, build_spec):
         build_spec = as_build_spec(build_spec)
-        return self.resolve(build_spec.artifact_id) is not None
+        return self.resolve(build_spec.artifact_id,build_store_only=True) is not None
 
     def ensure_present(self, build_spec, config, extra_env=None, virtuals=None, keep_build='never',
                        debug=False):
@@ -372,7 +585,6 @@ class BuildStore(object):
             raise ValueError("invalid keep_build value")
         build_spec = as_build_spec(build_spec)
         artifact_dir = self.resolve(build_spec.artifact_id)
-
 
         if artifact_dir is None:
             builder = ArtifactBuilder(self, build_spec, extra_env, virtuals, debug=debug)
