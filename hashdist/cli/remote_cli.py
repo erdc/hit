@@ -461,18 +461,23 @@ class Push(object):
                 pushing = ''
                 for subdir in [pjoin('packs', pack_type) for
                                pack_type in ['tar.bz2', 'tar.gz', 'tar.xz', 'zip']]:
-                    for source_pack in os.listdir(pjoin(cache.cache_path,
-                                                        subdir)):
-                        if (subdir in local_manifest and
+                    try:
+                        for source_pack in os.listdir(pjoin(cache.cache_path,
+                                                            subdir)):
+                            if (subdir in local_manifest and
                                 source_pack in local_manifest[subdir]):
-                            skipping += subdir + "/" + \
-                                source_pack + " Skipping\n"
-                        else:
-                            pushing += subdir + "/" + \
-                                source_pack + " Pushing\n"
-                sys.stdout.write(skipping)
-                sys.stdout.write("Use --force to push skipped source packs\n")
-                sys.stdout.write(pushing)
+                                skipping += subdir + "/" + \
+                                            source_pack + " Skipping\n"
+                            else:
+                                pushing += subdir + "/" + \
+                                           source_pack + " Pushing\n"
+                    except:
+                        ctx.logger.info("Could not list packs/{0}".format(pack_type))
+                        ctx.logger.info("Skipping packs/{0}".format(pack_type))
+                        pass
+                ctx.logger.info(skipping)
+                ctx.logger.info("Use --force to push skipped source packs\n")
+                ctx.logger.info(pushing)
             else:
                 try:
                     remote_manifest_bytes = remoteHandler.get_bytes(
