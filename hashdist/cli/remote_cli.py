@@ -496,18 +496,23 @@ class Push(object):
                 push_manifest = {}
                 for subdir in [pjoin('packs', pack_type)
                                for pack_type in ['tar.bz2', 'tar.gz', 'tar.xz', 'zip']]:
-                    if subdir not in manifest:
-                        manifest[subdir] = []
-                    for source_pack in os.listdir(pjoin(cache.cache_path,
-                                                        subdir)):
-                        if source_pack in manifest[subdir] and not args.force:
-                            msg = subdir + "/" + source_pack + \
-                                " already on remote"
-                            ctx.logger.info(msg)
-                        else:
-                            if subdir not in push_manifest:
-                                push_manifest[subdir] = set()
-                            push_manifest[subdir].add(source_pack)
+                    try:
+                        if subdir not in manifest:
+                            manifest[subdir] = []
+                        for source_pack in os.listdir(pjoin(cache.cache_path,
+                                                            subdir)):
+                            if source_pack in manifest[subdir] and not args.force:
+                                msg = subdir + "/" + source_pack + \
+                                      " already on remote"
+                                ctx.logger.info(msg)
+                            else:
+                                if subdir not in push_manifest:
+                                    push_manifest[subdir] = set()
+                                push_manifest[subdir].add(source_pack)
+                    except:
+                        ctx.logger.info("Could not list packs/{0}".format(pack_type))
+                        ctx.logger.info("Skipping packs/{0}".format(pack_type))
+                        pass
                 ctx.logger.info("Source packs to push" + repr(push_manifest))
                 for subdir, source_packs in push_manifest.iteritems():
                     for source_pack in source_packs:
