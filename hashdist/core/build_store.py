@@ -456,7 +456,18 @@ class BuildStore(object):
                         
                         # OK, we have an ELF, patch it. We first shrink the RPATH to what is actually used.
                         filename=path
-                        _check_call(self.logger, [patchelf, '--debug', '--shrink-rpath', filename])
+                        st = os.stat(filename)
+                        print("st_mode",st.st_mode)
+                        if not bool(st.st_mode & stat.S_IWUSR):
+                            print("{0} isn't writable by user".format(filename))
+                            _check_call(self.logger, ['chmod','u+rw',filename])
+                        else:
+                            print("{0} is writable by user trying to shrink rpath".format(filename))
+                            try:
+                                _check_call(self.logger, [patchelf, '--shrink-rpath', filename])
+                            except:
+                                os.system("ls -l")
+                                os.system("patchelf --shrink-rpath {0}".format(filename))
                         
                         # Then grab the RPATH, replace old location
                         try:
