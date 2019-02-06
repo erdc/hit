@@ -455,7 +455,7 @@ class BuildStore(object):
                         
                         # OK, we have an ELF, patch it. We first shrink the RPATH to what is actually used.
                         filename=path
-                        _check_call(logger, [patchelf, '--debug', '--shrink-rpath', filename])
+                        _check_call(self.logger, [patchelf, '--debug', '--shrink-rpath', filename])
                         
                         # Then grab the RPATH, replace old location
                         try:
