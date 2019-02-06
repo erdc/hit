@@ -464,8 +464,7 @@ class BuildStore(object):
                         try:
                             _check_call(self.logger, [patchelf, '--shrink-rpath', filename])
                         except:
-                            self.logger.info("patchelf can't patch {0} for some reason; trying system call and moving on".format(filename))
-                            os.system("${PATCHELF} --shrink-rpath {0}".format(filename))
+                            self.logger.info("patchelf can't patch {0} for some reason; moving on".format(filename))
                         # Then grab the RPATH, replace old location
                         try:
                             out = _check_call(self.logger, [patchelf, '--print-rpath', filename]).strip()
@@ -483,8 +482,7 @@ class BuildStore(object):
                             try:
                                 _check_call(self.logger, [patchelf, '--set-rpath', new_abs_rpaths_str, filename])
                             except:
-                                self.logger.info("patchelf can't patch {0} for some reason; trying system call and moving on".format(filename))
-                                os.system('${PATCHELF} --set-rpath {0} {1}'.format(new_abs_rpaths_str, filename))
+                                self.logger.info("patchelf can't patch {0} for some reason; moving on".format(filename))
                     else:
                         new_data = data.replace(from_b, to_b)
                         new_data = new_data.replace(from_b_parent, to_b_parent)
