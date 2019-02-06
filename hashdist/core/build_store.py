@@ -457,18 +457,15 @@ class BuildStore(object):
                         # OK, we have an ELF, patch it. We first shrink the RPATH to what is actually used.
                         filename=path
                         st = os.stat(filename)
-                        print("st_mode",st.st_mode)
+                        self.logger.info("{0} is mode {1}".format(filename,st.st_mode))
                         if not bool(st.st_mode & stat.S_IWUSR):
-                            print("{0} isn't writable by user".format(filename))
+                            self.logger.info("{0} isn't writable by user".format(filename))
                             _check_call(self.logger, ['chmod','u+rw',filename])
-                        else:
-                            print("{0} is writable by user trying to shrink rpath".format(filename))
-                            try:
-                                _check_call(self.logger, [patchelf, '--shrink-rpath', filename])
-                            except:
-                                os.system("ls -l")
-                                os.system("patchelf --shrink-rpath {0}".format(filename))
-                        
+                        try:
+                            _check_call(self.logger, [patchelf, '--shrink-rpath', filename])
+                        except:
+                            self.logger.info("patchelf can't patch {0} for some reason; trying system call and moving on".format(filename))
+                            os.system("${PATCHELF} --shrink-rpath {0}".format(filename))
                         # Then grab the RPATH, replace old location
                         try:
                             out = _check_call(self.logger, [patchelf, '--print-rpath', filename]).strip()
@@ -483,7 +480,11 @@ class BuildStore(object):
                             new_abs_rpaths = [abs_rpath.replace(from_b_parent,to_b_parent) for abs_rpath in new_abs_rpaths]
                             new_abs_rpaths_str = ':'.join(new_abs_rpaths)
                             self.logger.info('Rewriting RPATH on "%s" from "%s" to "%s"' % (filename, abs_rpaths_str, new_abs_rpaths_str))
-                            _check_call(self.logger, [patchelf, '--set-rpath', new_abs_rpaths_str, filename])
+                            try:
+                                _check_call(self.logger, [patchelf, '--set-rpath', new_abs_rpaths_str, filename])
+                            except:
+                                self.logger.info("patchelf can't patch {0} for some reason; trying system call and moving on".format(filename))
+                                os.system('${PATCHELF} --set-rpath {0} {1}'.format(new_abs_rpaths_str, filename))
                     else:
                         new_data = data.replace(from_b, to_b)
                         new_data = new_data.replace(from_b_parent, to_b_parent)
