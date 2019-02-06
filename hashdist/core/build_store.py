@@ -455,11 +455,11 @@ class BuildStore(object):
                         
                         # OK, we have an ELF, patch it. We first shrink the RPATH to what is actually used.
                         filename=path
-                        #_check_call(logger, [patchelf, '--shrink-rpath', filename])
+                        _check_call(logger, [patchelf, '--debug', '--shrink-rpath', filename])
                         
                         # Then grab the RPATH, replace old location
                         try:
-                            out = _check_call(self.logger, [patchelf, '--print-rpath', filename]).strip()
+                            out = _check_call(self.logger, [patchelf, '--debug', '--print-rpath', filename]).strip()
                         except:
                             out = False#did our best...
                         if out:
@@ -471,7 +471,7 @@ class BuildStore(object):
                             new_abs_rpaths = [abs_rpath.replace(from_b_parent,to_b_parent) for abs_rpath in new_abs_rpaths]
                             new_abs_rpaths_str = ':'.join(new_abs_rpaths)
                             self.logger.info('Rewriting RPATH on "%s" from "%s" to "%s"' % (filename, abs_rpaths_str, new_abs_rpaths_str))
-                            _check_call(self.logger, [patchelf, '--set-rpath', new_abs_rpaths_str, filename])
+                            _check_call(self.logger, [patchelf, '--debug', '--set-rpath', new_abs_rpaths_str, filename])
                     else:
                         new_data = data.replace(from_b, to_b)
                         new_data = new_data.replace(from_b_parent, to_b_parent)
