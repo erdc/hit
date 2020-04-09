@@ -8,7 +8,7 @@ from os.path import join as pjoin
 from ..deps import jsonschema
 from .marked_yaml import (load_yaml_from_file, validate_yaml, ValidationError)
 
-DEFAULT_STORE_DIR = os.path.expanduser('~/.hashdist')
+DEFAULT_STORE_DIR = os.path.join(os.environ['PROJECTS_HOME'],'proteus','hashdist_store')
 DEFAULT_CONFIG_FILENAME_REPR = os.path.join(DEFAULT_STORE_DIR, 'config.yaml')
 DEFAULT_CONFIG_FILENAME = os.path.expanduser(DEFAULT_CONFIG_FILENAME_REPR)
 DEFAULT_CONFIG_DIRS = ('ba', 'bld', 'src', 'db', 'cache', 'gcroots')
