@@ -410,6 +410,7 @@ class BuildStore(object):
         os.remove(temp_path)
         def relocate(artifact_dir, path):
             artifact_full_path = pjoin(self.artifact_root, artifact_dir)
+            subprocess.check_call(['chmod', 'u+rwX', '-R', artifact_full_path], cwd=self.artifact_root)
             if not path.startswith(artifact_full_path):
                 raise ValueError('filename must be prefixed with artifact_dir')
             s = path[len(artifact_full_path):]
@@ -455,8 +456,15 @@ class BuildStore(object):
                         
                         # OK, we have an ELF, patch it. We first shrink the RPATH to what is actually used.
                         filename=path
-                        #_check_call(logger, [patchelf, '--shrink-rpath', filename])
-                        
+                        st = os.stat(filename)
+                        self.logger.info("{0} is mode {1}".format(filename,st.st_mode))
+                        if not bool(st.st_mode & stat.S_IWUSR):
+                            self.logger.info("{0} isn't writable by user".format(filename))
+                            _check_call(self.logger, ['chmod','u+rw',filename])
+                        try:
+                            _check_call(self.logger, [patchelf, '--shrink-rpath', filename])
+                        except:
+                            self.logger.info("patchelf can't patch {0} for some reason; moving on".format(filename))
                         # Then grab the RPATH, replace old location
                         try:
                             out = _check_call(self.logger, [patchelf, '--print-rpath', filename]).strip()
@@ -471,7 +479,10 @@ class BuildStore(object):
                             new_abs_rpaths = [abs_rpath.replace(from_b_parent,to_b_parent) for abs_rpath in new_abs_rpaths]
                             new_abs_rpaths_str = ':'.join(new_abs_rpaths)
                             self.logger.info('Rewriting RPATH on "%s" from "%s" to "%s"' % (filename, abs_rpaths_str, new_abs_rpaths_str))
-                            _check_call(self.logger, [patchelf, '--set-rpath', new_abs_rpaths_str, filename])
+                            try:
+                                _check_call(self.logger, [patchelf, '--set-rpath', new_abs_rpaths_str, filename])
+                            except:
+                                self.logger.info("patchelf can't patch {0} for some reason; moving on".format(filename))
                     else:
                         new_data = data.replace(from_b, to_b)
                         new_data = new_data.replace(from_b_parent, to_b_parent)
