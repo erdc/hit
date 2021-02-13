@@ -697,7 +697,11 @@ class ArchiveSourceCache(object):
         else:
             # Make request.
             try:
-                stream = urllib2.urlopen(url)
+                #cek Fake user agent because some servers reject urllib2
+                #See https://gitlab.com/gitlab-org/gitlab/-/issues/219669
+                opener = urllib2.build_opener()
+                opener.addheaders = [('User-Agent', 'Mozilla/5.0')]
+                stream = opener.open(url)
             except urllib2.HTTPError, e:
                 msg = "urllib failed to download (code: %d): %s" % (e.code, url)
                 self.logger.info(msg)
