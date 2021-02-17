@@ -80,6 +80,8 @@ def silent_makedirs(path):
             pass
         elif not os.path.isdir(path):
             parent = os.path.split(path)[0]
+            while not os.path.isdir(parent):
+                parent = os.path.split(parent)[0]
             if os.path.isdir(parent):
                 try:
                     os.chmod(parent, 0o777)
