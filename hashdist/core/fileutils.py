@@ -46,8 +46,6 @@ def silent_relative_symlink(src, dst):
                     os.chmod(parent, 0o777)
                     os.symlink(rel_src, dst)
                 except OSError as e:
-                    import pdb
-                    pdb.set_trace()
                     if not os.path.exists(dst):
                         raise
             else:
@@ -80,15 +78,14 @@ def silent_makedirs(path):
             pass
         elif not os.path.isdir(path):
             parent = os.path.split(path)[0]
-            if os.path.isdir(parent):
-                try:
-                    os.chmod(parent, 0o777)
-                    os.makedirs(path)
-                except OSError:
-                    if not os.path.isdir(path):
-                        raise
-            else:
-                raise
+            while not os.path.isdir(parent):
+                parent = os.path.split(parent)[0]
+            try:
+                os.chmod(parent, 0o777)
+                os.makedirs(path)
+            except OSError:
+                if not os.path.isdir(path):
+                    raise
 
 def silent_unlink(path):
     """like os.unlink but does not raise error if the file does not exist"""
