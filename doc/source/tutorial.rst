@@ -86,7 +86,7 @@ zlib.  We fetch one as a tarball and one using git::
     <snip curl output>
     tar.gz:HtaA96RDXGi2QGcJuwiHQrVit67BpE0Llh6UzzCv-q8
 
-    $ hdist fetchgit git://github.com/erdc-cm/szip.git master
+    $ hdist fetchgit git://github.com/erdc/szip.git master
     <snip git output>
     git:87863577a4656d5414b0d598c91fed1dd227f74a
 
@@ -115,7 +115,7 @@ the creation of a script ``mystack.py`` containing::
                                    unix=unix, gcc=gcc)
     
     szip = hr.ConfigureMakeInstall('szip', '2.1',
-                                   'git://github.com/erdc-cm/szip.git',
+                                   'git://github.com/erdc/szip.git',
                                    'git:87863577a4656d5414b0d598c91fed1dd227f74a',
                                    configure_flags=['--with-pic'],
                                    unix=unix, gcc=gcc)
